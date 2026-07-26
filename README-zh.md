@@ -1,5 +1,5 @@
   
-> ✨ 同一作者的新应用：[MuseStudio](https://github.com/zanllp/MuseStudio)——Threads 式并发生图工作台，生成的图片自带 SD WebUI 兼容元数据，IIB 开箱即可索引。
+> ✨ 同一作者的新应用：[SpindleStudio](https://github.com/zanllp/SpindleStudio)——Threads 式并发生图工作台，生成的图片自带 SD WebUI 兼容元数据，IIB 开箱即可索引。
 
 # 无边图像浏览
 
