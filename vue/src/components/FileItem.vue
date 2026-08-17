@@ -6,7 +6,7 @@ import type { FileNodeInfo } from '@/api/files'
 import { isImageFile, isVideoFile, isAudioFile } from '@/util'
 import { toImageThumbnailUrl, toVideoCoverUrl, toRawFileUrl } from '@/util/file'
 import type { MenuInfo } from 'ant-design-vue/lib/menu/src/interface'
-import { computed, ref, nextTick, watch } from 'vue'
+import { computed, ref, nextTick, watch, onBeforeUnmount } from 'vue'
 import ContextMenu from './ContextMenu.vue'
 import ChangeIndicator from './ChangeIndicator.vue'
 import DraggableImage from './DraggableImage.vue'
@@ -84,6 +84,32 @@ const imageSrc = computed(() => {
   const r = global.gridThumbnailResolution
   return global.enableThumbnail ? toImageThumbnailUrl(props.file, [r, r].join('x')) : toRawFileUrl(props.file)
 })
+
+const imageContainerRef = ref<HTMLElement | null>(null)
+const isImageNearViewport = ref(false)
+const lazyImageSrc = computed(() => isImageNearViewport.value ? imageSrc.value : undefined)
+let imageObserver: IntersectionObserver | undefined
+
+watch(imageContainerRef, (el) => {
+  imageObserver?.disconnect()
+  imageObserver = undefined
+  if (!el || isImageNearViewport.value) return
+
+  if (!('IntersectionObserver' in window)) {
+    isImageNearViewport.value = true
+    return
+  }
+
+  imageObserver = new IntersectionObserver((entries) => {
+    if (!entries.some(entry => entry.isIntersecting)) return
+    isImageNearViewport.value = true
+    imageObserver?.disconnect()
+    imageObserver = undefined
+  }, { rootMargin: '400px 0px' })
+  imageObserver.observe(el)
+}, { flush: 'post' })
+
+onBeforeUnmount(() => imageObserver?.disconnect())
 
 const tags = computed(() => {
   return (global.conf?.all_custom_tags ?? []).reduce((p, c) => {
@@ -291,14 +317,14 @@ const handleAudioClick = () => {
         </div>
         <!-- :key="fullScreenPreviewImageUrl ? undefined : file.fullpath"
           这么复杂是因为再全屏查看时可能因为直接删除导致fullpath变化，然后整个预览直接退出-->
-        <div :key="file.fullpath" :class="`idx-${idx} item-content`" v-if="isImageFile(file.name)">
+        <div ref="imageContainerRef" :key="file.fullpath" :class="`idx-${idx} item-content`" v-if="isImageFile(file.name)">
 
           <!-- change indicators -->
           <ChangeIndicator v-if="enableChangeIndicator && genDiffToNext && genDiffToPrevious"
             :gen-diff-to-next="genDiffToNext" :gen-diff-to-previous="genDiffToPrevious" />
           <!-- change indicators END -->
 
-          <a-image :src="imageSrc" :fallback="fallbackImage" :preview="{
+          <a-image :src="lazyImageSrc" :fallback="fallbackImage" :alt="file.name" decoding="async" :preview="{
     src: fullScreenPreviewImageUrl,
     onVisibleChange: (v: boolean, lv: boolean) => emit('previewVisibleChange', v, lv)
   }" />
@@ -353,7 +379,7 @@ const handleAudioClick = () => {
         <div v-else class="preview-icon-wrap">
           <file-outlined class="icon center" v-if="file.type === 'file'" />
           <div v-else-if="coverFiles?.length && cellWidth > 160" class="dir-cover-container">
-            <img class="dir-cover-item"
+            <img class="dir-cover-item" loading="lazy" decoding="async" fetchpriority="low"
               :src="item.media_type === 'image' ? toImageThumbnailUrl(item) : toVideoCoverUrl(item)"
               v-for="item in coverFiles" :key="item.fullpath">
           </div>

@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import threading
 
 from scripts.iib.dir_cover_cache import get_top_4_media_info
 from scripts.iib.tool import (
@@ -125,6 +126,48 @@ is_api_writeable = not (os.getenv("IIB_ACCESS_CONTROL_PERMISSION")) or (
     os.getenv("IIB_ACCESS_CONTROL_PERMISSION") in WRITEABLE_PERMISSIONS
 )
 IIB_DEBUG=False
+
+_MAX_THUMBNAIL_DIMENSION = 4096
+_THUMBNAIL_GENERATION_SLOTS = threading.BoundedSemaphore(
+    max(2, min(4, os.cpu_count() or 2))
+)
+_THUMBNAIL_LOCKS = tuple(threading.Lock() for _ in range(64))
+
+
+def _parse_thumbnail_size(size: str):
+    try:
+        width, height = (int(value) for value in size.lower().split("x", 1))
+    except (AttributeError, TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid thumbnail size")
+
+    if not (0 < width <= _MAX_THUMBNAIL_DIMENSION and 0 < height <= _MAX_THUMBNAIL_DIMENSION):
+        raise HTTPException(status_code=400, detail="Invalid thumbnail size")
+    return width, height
+
+
+def _ensure_thumbnail(path: str, cache_path: str, width: int, height: int):
+    lock_idx = int(hashlib.md5(cache_path.encode("utf-8")).hexdigest()[:8], 16) % len(_THUMBNAIL_LOCKS)
+    with _THUMBNAIL_LOCKS[lock_idx]:
+        if os.path.exists(cache_path):
+            return
+
+        with _THUMBNAIL_GENERATION_SLOTS:
+            if os.path.exists(cache_path):
+                return
+
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            temp_path = f"{cache_path}.{threading.get_ident()}.tmp"
+            try:
+                with Image.open(path) as img:
+                    # JPEG decoders can downsample during decode, which saves substantial
+                    # CPU and memory for large source images.
+                    img.draft("RGB", (width, height))
+                    img.thumbnail((width, height))
+                    img.save(temp_path, "WEBP", quality=80, method=1)
+                os.replace(temp_path, cache_path)
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
 
 
 async def write_permission_required():
@@ -627,22 +670,28 @@ def infinite_image_browsing_api(app: FastAPI, **kwargs):
         return res
 
     @app.get(api_base + "/image-thumbnail", dependencies=[Depends(verify_secret)])
-    async def thumbnail(path: str, t: str, size: str = "256x256"):
+    def thumbnail(path: str, t: str, size: str = "256x256"):
         check_path_trust(path)
         if not cache_base_dir:
             return
+        width, height = _parse_thumbnail_size(size)
+        size = f"{width}x{height}"
         # 生成缓存文件的路径
         hash_dir = hashlib.md5((path + t).encode("utf-8")).hexdigest()
         hash = hash_dir + size
         cache_dir = os.path.join(cache_base_dir, "iib_cache", hash_dir)
         cache_path = os.path.join(cache_dir, f"{size}.webp")
+        cache_headers = {
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "ETag": hash,
+        }
 
         # 如果缓存文件存在，则直接返回该文件
         if os.path.exists(cache_path):
             return FileResponse(
                 cache_path,
                 media_type="image/webp",
-                headers={"Cache-Control": "max-age=31536000", "ETag": hash},
+                headers=cache_headers,
             )
 
                 
@@ -651,23 +700,18 @@ def infinite_image_browsing_api(app: FastAPI, **kwargs):
             return FileResponse(
                 path,
                 media_type="image/" + path.split(".")[-1],
-                headers={"Cache-Control": "max-age=31536000", "ETag": hash},
+                headers=cache_headers,
             )
         
 
         # 如果缓存文件不存在，则生成缩略图并保存
-        with Image.open(path) as img:
-            w, h = size.split("x")
-            img.thumbnail((int(w), int(h)))
-            os.makedirs(cache_dir, exist_ok=True)
-            img.save(cache_path, "webp")
-            # print(f"Image cache generated: {path}")
+        _ensure_thumbnail(path, cache_path, width, height)
 
         # 返回缓存文件
         return FileResponse(
             cache_path,
             media_type="image/webp",
-            headers={"Cache-Control": "max-age=31536000", "ETag": hash},
+            headers=cache_headers,
         )
 
     @app.get(api_base + "/img/{filename}", dependencies=[Depends(verify_secret)])
